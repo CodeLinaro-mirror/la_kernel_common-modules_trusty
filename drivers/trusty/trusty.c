@@ -20,6 +20,10 @@
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
 
+#if CONFIG_ARM64
+#include <asm/daifflags.h>
+#endif
+
 #include "trusty-irq.h"
 #include "trusty-smc.h"
 #include "trusty-trace.h"
@@ -133,6 +137,32 @@ static unsigned long trusty_std_call_inner(struct device *dev,
 	return ret;
 }
 
+#if CONFIG_ARM64
+
+static void trusty_local_irq_disable_before_smc(void)
+{
+	local_daif_mask();
+}
+
+static void trusty_local_irq_enable_after_smc(void)
+{
+	local_daif_restore(DAIF_PROCCTX);
+}
+
+#else
+
+static void trusty_local_irq_disable_before_smc(void)
+{
+	local_irq_disable();
+}
+
+static void trusty_local_irq_enable_after_smc(void)
+{
+	local_irq_enable();
+}
+
+#endif
+
 static unsigned long trusty_std_call_helper(struct device *dev,
 					    unsigned long smcnr,
 					    unsigned long a0, unsigned long a1,
@@ -143,7 +173,7 @@ static unsigned long trusty_std_call_helper(struct device *dev,
 	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
 
 	while (true) {
-		local_irq_disable();
+		trusty_local_irq_disable_before_smc();
 
 		/* tell Trusty scheduler what the current priority is */
 		WARN_ON_ONCE(current->policy != SCHED_NORMAL);
@@ -171,7 +201,7 @@ static unsigned long trusty_std_call_helper(struct device *dev,
 			 */
 			trusty_enqueue_nop(dev, NULL);
 		}
-		local_irq_enable();
+		trusty_local_irq_enable_after_smc();
 
 		if ((int)ret != SM_ERR_BUSY)
 			break;
@@ -426,7 +456,6 @@ static int __trusty_share_memory(struct device *dev, u64 *id,
 
 	if (!ret) {
 		*id = ffa_handle;
-		dev_dbg(s->dev, "%s: done\n", __func__);
 		goto done;
 	}
 
@@ -499,7 +528,6 @@ int trusty_reclaim_memory(struct device *dev, u64 id,
 
 		dma_unmap_sg(dev, sglist, nents, DMA_BIDIRECTIONAL);
 
-		dev_dbg(s->dev, "%s: done\n", __func__);
 		return 0;
 	}
 
@@ -524,8 +552,6 @@ int trusty_reclaim_memory(struct device *dev, u64 id,
 		goto err_ffa_mem_reclaim;
 
 	dma_unmap_sg(dev, sglist, nents, DMA_BIDIRECTIONAL);
-
-	dev_dbg(s->dev, "%s: done\n", __func__);
 
 err_ffa_mem_reclaim:
 	trace_trusty_reclaim_memory_done(id, ret);
