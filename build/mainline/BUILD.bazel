@@ -40,13 +40,45 @@ ddk_module(
         "drivers/trusty/trusty-irq.c",
         "drivers/trusty/trusty-mem.c",
         "drivers/trusty/trusty-sched-share.c",
-        "drivers/trusty/trusty-smc-arm64.S",
     ],
     out = "trusty-core.ko",
     defconfig = "trusty_defconfig.fragment",
     kconfig = "Kconfig",
     kernel_build = ":trusty_aarch64",
     deps = [
+        "//common-modules/trusty:headers",
+    ],
+)
+
+ddk_module(
+    name = "trusty-ffa",
+    srcs = [
+        "drivers/trusty/trusty-ffa-transport.c",
+    ],
+    out = "trusty-ffa.ko",
+    defconfig = "trusty_defconfig.fragment",
+    kconfig = "Kconfig",
+    kernel_build = ":trusty_aarch64",
+    deps = [
+        "//common:all_headers_aarch64",
+        "//common-modules/trusty:headers",
+    ],
+)
+
+ddk_module(
+    name = "trusty-smc",
+    srcs = [
+        "drivers/trusty/trusty-smc-arm64.S",
+        "drivers/trusty/trusty-smc-transport.c",
+    ],
+    out = "trusty-smc.ko",
+    defconfig = "trusty_defconfig.fragment",
+    kconfig = "Kconfig",
+    kernel_build = ":trusty_aarch64",
+    deps = [
+        ":trusty-core",
+        ":trusty-ffa",
+        "//common:all_headers_aarch64",
         "//common-modules/trusty:headers",
     ],
 )
@@ -84,7 +116,8 @@ ddk_module(
 ddk_module(
     name = "trusty-test",
     srcs = [
-        "drivers/trusty/trusty-test.c",
+        "drivers/trusty/trusty-test-arm64.S",
+        "drivers/trusty/trusty-test-main.c",
     ],
     out = "trusty-test.ko",
     defconfig = "trusty_defconfig.fragment",
@@ -115,8 +148,10 @@ kernel_module_group(
     name = "trusty_aarch64_external_modules",
     srcs = [
         ":trusty-core",
+        ":trusty-ffa",
         ":trusty-ipc",
         ":trusty-log",
+        ":trusty-smc",
         ":trusty-test",
         ":trusty-virtio",
     ],
