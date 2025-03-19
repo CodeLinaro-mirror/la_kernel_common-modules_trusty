@@ -918,10 +918,6 @@ static int trusty_probe(struct platform_device *pdev)
 	 */
 	if (!node)
 		node = pdev->dev.parent->of_node;
-	if (!node) {
-		dev_err(&pdev->dev, "of_node required\n");
-		return -EINVAL;
-	}
 
 	tr = dev_get_drvdata(pdev->dev.parent);
 	if (!tr)
@@ -1015,16 +1011,39 @@ static int trusty_probe(struct platform_device *pdev)
 		goto err_alloc_sched_share;
 	}
 
-	ret = of_platform_populate(node, NULL, NULL, &pdev->dev);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
-		goto err_add_children;
+	/*
+	 * Register the scheduler state with the transport.
+	 * We need to do this before of_platform_populate
+	 * because the FF-A transport uses it for NOP calls.
+	 */
+	if (s->transport->ops->set_sched_share_state)
+		s->transport->ops->set_sched_share_state(s->transport,
+							 s->trusty_sched_share_state);
+
+	if (node) {
+		ret = of_platform_populate(node, NULL, NULL, &pdev->dev);
+		if (ret < 0) {
+			dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
+			goto err_add_children;
+		}
+	} else {
+		dev_warn(&pdev->dev, "of_node not found\n");
 	}
 
 	/* attempt to share; it is optional for compatibility with Trusty
-	 * versions that don't support priority sharing
+	 * versions that don't support priority sharing, but required
+	 * for transports that provide set_sched_share_state, e.g., FF-A.
 	 */
-	trusty_register_sched_share(s->dev, s->trusty_sched_share_state);
+	ret = trusty_register_sched_share(s->dev, s->trusty_sched_share_state);
+
+	/*
+	 * Clear the scheduler state with the transport if we got an error.
+	 * The FF-A NOP handler needs the state for FFA_RUN but checks
+	 * if the state is set. We get an error there if it is missing,
+	 * but only if we actually need to call FFA_RUN.
+	 */
+	if (s->transport->ops->set_sched_share_state && ret)
+		s->transport->ops->set_sched_share_state(s->transport, NULL);
 
 	return 0;
 
@@ -1082,6 +1101,7 @@ static void trusty_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id trusty_of_match[] = {
+	{ .compatible = "android,trusty-core-v1", },
 	{},
 };
 
