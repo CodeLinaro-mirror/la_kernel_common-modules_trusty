@@ -12,6 +12,7 @@
 #include <linux/trusty/smcall.h>
 #include <linux/arm_ffa.h>
 #include <linux/trusty/trusty.h>
+#include <linux/version.h>
 
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
@@ -24,6 +25,7 @@ static struct ffa_driver trusty_ffa_driver;
 
 struct trusty_ffa_state {
 	struct device *dev; /* ffa device */
+	struct device *core_dev; /* the trusty-core device */
 	struct trusty_transport transport;
 	struct trusty_sched_share_state *sched_share_state;
 };
@@ -232,6 +234,19 @@ static const struct trusty_transport_ops trusty_ffa_transport_ops = {
 	.set_sched_share_state = &trusty_ffa_set_sched_share_state,
 };
 
+static void trusty_ffa_sched_recv_cb(u16 vcpu, bool is_per_vcpu, void *cb_data)
+{
+	struct trusty_ffa_state *s = cb_data;
+
+	if (!s->core_dev)
+		return;
+
+	if (is_per_vcpu)
+		trusty_enqueue_nop_on_cpu(s->core_dev, NULL, vcpu);
+	else
+		trusty_enqueue_nop(s->core_dev, NULL);
+}
+
 static int trusty_ffa_probe(struct ffa_device *ffa_dev)
 {
 	struct trusty_ffa_state *s;
@@ -260,14 +275,38 @@ static int trusty_ffa_probe(struct ffa_device *ffa_dev)
 
 	ffa_dev->ops->msg_ops->mode_32bit_set(ffa_dev);
 
+	ret = ffa_dev->ops->notifier_ops->sched_recv_cb_register(
+		ffa_dev, trusty_ffa_sched_recv_cb, s);
+	if (ret < 0) {
+		dev_err(s->dev, "failed to register SRI callback (%d)\n",
+			ret);
+
+		/*
+		 * For now, we log and continue if notifications are not
+		 * supported because not all current SPMCs have them,
+		 * e.g., EL3-SPMC.
+		 */
+		if (ret != -EOPNOTSUPP)
+			goto err_ffa_sched_recv_cb;
+	}
+
 	return 0;
 
+err_ffa_sched_recv_cb:
+	ffa_dev_set_drvdata(ffa_dev, NULL);
+	kfree(s);
 err_alloc:
 err_ffa_version:
 	return ret;
 }
 
-static void trusty_ffa_remove(struct ffa_device *ffa_dev)
+static
+#if (KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE)
+int
+#else
+void
+#endif
+trusty_ffa_remove(struct ffa_device *ffa_dev)
 {
 	struct trusty_ffa_state *s = ffa_dev_get_drvdata(ffa_dev);
 
@@ -277,6 +316,9 @@ static void trusty_ffa_remove(struct ffa_device *ffa_dev)
 	 */
 	memzero_explicit(s, sizeof(struct trusty_ffa_state));
 	kfree(s);
+#if (KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE)
+	return 0;
+#endif
 }
 
 static const struct ffa_device_id trusty_ffa_device_id[] = {
@@ -303,22 +345,17 @@ static int trusty_ffa_dev_match(struct device *dev, const void *uuid)
 struct device *trusty_ffa_find_device(void)
 {
 	struct device *ffa_dev;
-	const struct bus_type *ffa_bus = symbol_get(ffa_bus_type);
-
-	if (!ffa_bus)
-		return ERR_PTR(-ENOENT);
 
 	/* currently only one trusty instance is probed */
-	ffa_dev = bus_find_device(ffa_bus, NULL, &trusty_ffa_device_id[0].uuid,
+	ffa_dev = bus_find_device(&ffa_bus_type, NULL, &trusty_ffa_device_id[0].uuid,
 				  trusty_ffa_dev_match);
 
 	if (ffa_dev) {
-		if (bus_find_device(ffa_bus, ffa_dev, &trusty_ffa_device_id[0].uuid,
+		if (bus_find_device(&ffa_bus_type, ffa_dev, &trusty_ffa_device_id[0].uuid,
 				    trusty_ffa_dev_match))
 			dev_warn(ffa_dev, "multiple Trusty instances found, not supported yet");
 	}
 
-	symbol_put(ffa_bus_type);
 	return ffa_dev ?: ERR_PTR(-ENODEV);
 }
 EXPORT_SYMBOL(trusty_ffa_find_device);
@@ -392,6 +429,10 @@ static int trusty_ffa_platform_probe(struct platform_device *pdev)
 		rc = -EINVAL;
 		goto err_invalid_state;
 	}
+	if (WARN_ON(s->core_dev)) {
+		rc = -EINVAL;
+		goto err_invalid_state;
+	}
 
 	platform_set_drvdata(pdev, &s->transport);
 
@@ -404,6 +445,15 @@ static int trusty_ffa_platform_probe(struct platform_device *pdev)
 	} else {
 		dev_warn(&pdev->dev, "of_node not found\n");
 	}
+
+	/*
+	 * Depending on how it was created, the core device is either
+	 * named trusty-ffa:trusty-core (from of_platform_populate)
+	 * or just trusty-core if we create it ourselves
+	 */
+	s->core_dev = device_find_child_by_name(&pdev->dev, "trusty-ffa:trusty-core");
+	if (!s->core_dev)
+		s->core_dev = device_find_child_by_name(&pdev->dev, "trusty-core");
 
 	return 0;
 
@@ -425,6 +475,8 @@ static void trusty_ffa_platform_remove(struct platform_device *pdev)
 	device_for_each_child(&pdev->dev, NULL, trusty_ffa_remove_child);
 
 	put_device(s->dev);
+	put_device(s->core_dev);
+	s->core_dev = NULL;
 }
 
 static const struct of_device_id trusty_ffa_of_match[] = {
@@ -436,7 +488,7 @@ MODULE_DEVICE_TABLE(trusty_ffa, trusty_ffa_of_match);
 
 static struct platform_driver trusty_ffa_platform_driver = {
 	.probe = trusty_ffa_platform_probe,
-	.remove_new = trusty_ffa_platform_remove,
+	.remove = trusty_ffa_platform_remove,
 	.driver	= {
 		.name = "trusty-ffa",
 		.of_match_table = trusty_ffa_of_match,

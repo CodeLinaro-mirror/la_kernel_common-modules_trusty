@@ -1683,6 +1683,7 @@ static long filp_send_ioctl(struct file *filp,
 		default:
 			dev_err(dev, "Unknown transfer type: 0x%x\n",
 				shm[shm_idx].transfer);
+			ret = -EINVAL;
 			goto shm_share_failed;
 		}
 		ret = dn_share_fd(dn, shm[shm_idx].fd, shm[shm_idx].transfer,
@@ -2814,5 +2815,9 @@ module_exit(tipc_exit);
 
 MODULE_DEVICE_TABLE(tipc, tipc_virtio_id_table);
 MODULE_DESCRIPTION("Trusty IPC driver");
+#if (KERNEL_VERSION(6, 13, 0) > LINUX_VERSION_CODE)
 MODULE_IMPORT_NS(DMA_BUF);
+#else
+MODULE_IMPORT_NS("DMA_BUF");
+#endif
 MODULE_LICENSE("GPL v2");

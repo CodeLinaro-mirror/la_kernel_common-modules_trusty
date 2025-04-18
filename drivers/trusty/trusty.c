@@ -15,6 +15,7 @@
 #include <linux/trusty/smcall.h>
 #include <linux/trusty/sm_err.h>
 #include <linux/trusty/trusty.h>
+#include <linux/version.h>
 
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
@@ -669,7 +670,7 @@ static void trusty_adjust_nice_nopreempt(struct trusty_state *s, bool do_nop)
 	unsigned long flags;
 	struct trusty_work *tw;
 
-	local_irq_save(flags);
+	spin_lock_irqsave(&s->nop_lock, flags);
 
 	cur_nice = task_nice(current);
 
@@ -703,7 +704,7 @@ static void trusty_adjust_nice_nopreempt(struct trusty_state *s, bool do_nop)
 	/* tell Linux the desired priority */
 	set_user_nice(current, req_nice);
 
-	local_irq_restore(flags);
+	spin_unlock_irqrestore(&s->nop_lock, flags);
 }
 
 static void nop_work_func(struct trusty_work *tw)
@@ -766,7 +767,7 @@ static void nop_work_func(struct trusty_work *tw)
 	dev_dbg(s->dev, "%s: done\n", __func__);
 }
 
-void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
+void trusty_enqueue_nop_on_cpu(struct device *dev, struct trusty_nop *nop, int cpu)
 {
 	unsigned long flags;
 	struct trusty_work *tw;
@@ -776,16 +777,15 @@ void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
 	if (!s)
 		return;
 
-	trace_trusty_enqueue_nop(nop);
-	preempt_disable();
-	tw = this_cpu_ptr(s->nop_works);
+	spin_lock_irqsave(&s->nop_lock, flags);
+
+	trace_trusty_enqueue_nop(nop, cpu);
+	tw = per_cpu_ptr(s->nop_works, cpu);
 	if (nop) {
 		WARN_ON(s->api_version < TRUSTY_API_VERSION_SMP_NOP);
 
-		spin_lock_irqsave(&s->nop_lock, flags);
 		if (list_empty(&nop->node))
 			list_add_tail(&nop->node, &s->nop_queue);
-		spin_unlock_irqrestore(&s->nop_lock, flags);
 	}
 
 	/* boost the priority here so the thread can get to it fast */
@@ -798,8 +798,16 @@ void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
 
 	/* indicate that this cpu was signaled */
 	tw->signaled = true;
+	spin_unlock_irqrestore(&s->nop_lock, flags);
 
 	wake_up_interruptible(&tw->nop_event_wait);
+}
+EXPORT_SYMBOL(trusty_enqueue_nop_on_cpu);
+
+void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
+{
+	preempt_disable();
+	trusty_enqueue_nop_on_cpu(dev, nop, smp_processor_id());
 	preempt_enable();
 }
 EXPORT_SYMBOL(trusty_enqueue_nop);
@@ -1071,7 +1079,14 @@ err_allocate_state:
 	return ret;
 }
 
-static void trusty_remove(struct platform_device *pdev)
+
+static
+#if (KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE)
+int
+#else
+void
+#endif
+trusty_remove(struct platform_device *pdev)
 {
 	unsigned int cpu;
 	struct trusty_state *s = trusty_get_state(&pdev->dev);
@@ -1098,6 +1113,9 @@ static void trusty_remove(struct platform_device *pdev)
 	s->dev->dma_parms = NULL;
 	kfree(s->version_str);
 	kfree(s);
+#if (KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE)
+	return 0;
+#endif
 }
 
 static const struct of_device_id trusty_of_match[] = {
@@ -1109,7 +1127,7 @@ MODULE_DEVICE_TABLE(trusty, trusty_of_match);
 
 static struct platform_driver trusty_driver = {
 	.probe = trusty_probe,
-	.remove_new = trusty_remove,
+	.remove = trusty_remove,
 	.driver	= {
 		.name = "trusty-core",
 		.of_match_table = trusty_of_match,
